@@ -21,6 +21,8 @@ var _music_buf: Array[float] = []
 var _music_bar: int = 0
 var _music_ready: bool = false
 var _want_music: bool = false
+var _duck: float = 1.0
+var _paused: bool = false
 var _rng := RandomNumberGenerator.new()
 
 
@@ -39,7 +41,8 @@ func _ready() -> void:
 	_music_player.bus = "Music"
 	add_child(_music_player)
 	_build_sfx()
-	_music_buf.resize(int(MUSIC_BARS * 16 * STEP * RATE) + RATE)
+	# One extra second catches the decay tails of the last bar; they are folded onto the start.
+	_music_buf.resize(loop_frames() + RATE)
 	_music_buf.fill(0.0)
 
 
@@ -84,12 +87,35 @@ func _process(_delta: float) -> void:
 ## Plays a named effect. pitch lets the same chime rise with the combo.
 func play(sfx_name: String, pitch: float = 1.0) -> void:
 	# Headless runs have no audio output. Playing there only leaves playback objects alive at exit.
-	if not _sfx.has(sfx_name) or DisplayServer.get_name() == "headless":
+	if _paused or not _sfx.has(sfx_name) or DisplayServer.get_name() == "headless":
 		return
 	var player := _free_player()
 	player.stream = _sfx[sfx_name]
 	player.pitch_scale = pitch
 	player.play()
+
+
+## Length of the music loop in samples: exactly MUSIC_BARS bars, so the beat never pauses at the seam.
+static func loop_frames() -> int:
+	return int(MUSIC_BARS * 16 * STEP * RATE)
+
+
+## Game over: three falling notes, and the music ducks to a quarter for 1.6 s.
+func play_game_over() -> void:
+	play("over")
+	_duck = 0.25
+	apply_volumes()
+	get_tree().create_timer(1.6).timeout.connect(func() -> void:
+		_duck = 1.0
+		apply_volumes())
+
+
+## Pause (and a lost window focus) freezes every sound; resuming continues where it stopped.
+func set_paused(on: bool) -> void:
+	_paused = on
+	for p in _players:
+		p.stream_paused = on
+	_music_player.stream_paused = on
 
 
 func start_music() -> void:
@@ -105,7 +131,7 @@ func stop_music() -> void:
 
 func apply_volumes() -> void:
 	_apply_bus("Master", Save.settings["master"], true)
-	_apply_bus("Music", Save.settings["music"], Save.settings["music_on"])
+	_apply_bus("Music", Save.settings["music"] * _duck, Save.settings["music_on"])
 	_apply_bus("SFX", Save.settings["sfx"], Save.settings["sfx_on"])
 	if Save.settings["music_on"] and _want_music and _music_ready and not _music_player.playing:
 		_music_player.play()
@@ -136,10 +162,15 @@ func _free_player() -> AudioStreamPlayer:
 
 
 func _finish_music() -> void:
+	# Fold the tail past the loop end back onto the start, so pads and decays ring across the seam.
+	var n := loop_frames()
+	for i in _music_buf.size() - n:
+		_music_buf[i] += _music_buf[n + i]
+	_music_buf.resize(n)
 	var stream := _to_wav(_music_buf)
 	stream.loop_mode = AudioStreamWAV.LOOP_FORWARD
 	stream.loop_begin = 0
-	stream.loop_end = _music_buf.size()
+	stream.loop_end = n
 	_music_player.stream = stream
 	_music_ready = true
 	if _want_music and Save.settings["music_on"]:
@@ -158,6 +189,7 @@ func _build_sfx() -> void:
 	_sfx["steal"] = _to_wav(_sfx_steal())
 	_sfx["boom"] = _to_wav(_sfx_boom())
 	_sfx["start"] = _to_wav(_sfx_start())
+	_sfx["over"] = _to_wav(_sfx_over())
 
 
 func _sfx_flap() -> Array[float]:
@@ -217,6 +249,14 @@ func _sfx_start() -> Array[float]:
 	var b := _blank(0.3)
 	_voice(b, 0.0, 0.12, 523.0, 523.0, 0.3, 3)
 	_voice(b, 0.1, 0.16, 784.0, 784.0, 0.3, 3)
+	return b
+
+
+func _sfx_over() -> Array[float]:
+	var b := _blank(0.6)
+	for i in 3:
+		var f: float = [523.0, 392.0, 262.0][i]
+		_voice(b, i * 0.12, 0.22, f, f * 0.97, 0.3, 2)
 	return b
 
 

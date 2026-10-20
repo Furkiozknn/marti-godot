@@ -84,7 +84,8 @@ func _shore_band(level: Level, z0: float) -> void:
 			var d := randf_range(2.6, 3.4)
 			_add_prop(level, "house", Vector3(x, y + h * 0.5, z), Vector3(w, h, d), Color.html(_pick(HOUSE_HEX)))
 			if randf() < 0.6:
-				_add_prop(level, "roof", Vector3(x, y + h + 0.5, z), Vector3(w * 1.2, 1.0, d * 1.2), Color.html(_pick(ROOF_HEX)))
+				# Pyramid roof: its base sits on the top of the house.
+				_add_prop(level, "roof", Vector3(x, y + h, z), Vector3(w * 1.2, randf_range(0.75, 1.2), d * 1.2), Color.html(_pick(ROOF_HEX)))
 		for _tree in 3:
 			var tx := side * randf_range(34.0, 62.0)
 			var tz := z0 + randf_range(0.0, 40.0)
@@ -92,18 +93,40 @@ func _shore_band(level: Level, z0: float) -> void:
 			var th := randf_range(3.2, 5.4)
 			_add_prop(level, "tree", Vector3(tx, ty + th * 0.5, tz), Vector3(1.8, th, 1.8), Color.html(_pick(TREE_HEX)))
 		if randf() < 0.22:
+			# The mosque faces the water (its +z turned towards x = 0) and sinks 0.3 into the slope.
 			var dx := side * randf_range(46.0, 54.0)
 			var dz := z0 + randf_range(5.0, 35.0)
-			var dy := Level.terrain_height(dx, dz)
-			_add_prop(level, "dome", Vector3(dx, dy + 0.6, dz), Vector3(3.2, 2.6, 3.2), Color.html("#E9C46A") if randf() < 0.5 else Color.WHITE)
-			_add_prop(level, "minaret", Vector3(dx + side * 4.5, dy + 4.0, dz - 2.5), Vector3(0.9, 8.0, 0.9), Color.WHITE)
-			_add_prop(level, "minaret", Vector3(dx - side * 0.5, dy + 4.0, dz + 3.5), Vector3(0.8, 8.0, 0.8), Color.WHITE)
+			_add_landmark(level, "mosque", dx, Level.terrain_height(dx, dz) - 0.3, dz, side)
 		if randf() < 0.12:
 			var bx := side * randf_range(40.0, 70.0)
 			var bz := z0 + randf_range(0.0, 30.0)
 			_add_prop(level, "balloon", Vector3(bx, randf_range(26.0, 40.0), bz), Vector3(2.6, 3.1, 2.6), Color.html(_pick(BALLOON_HEX)))
 		if randf() < 0.5:
-			_add_prop(level, "cloud", Vector3(randf_range(-150.0, 150.0), randf_range(44.0, 66.0), z0 + randf_range(0.0, 40.0)), Vector3(randf_range(2.4, 4.4), 2.4, 2.4), Color.WHITE)
+			var cs := randf_range(4.8, 8.8)
+			_add_prop(level, "cloud", Vector3(randf_range(-150.0, 150.0), randf_range(44.0, 66.0), z0 + randf_range(0.0, 40.0)), Vector3(cs, cs * 0.55, cs * 0.55), Color.WHITE)
+		# Rare landmarks: a yalı on the shore, the Galata tower further up, the Maiden's tower on its
+		# islet in the water at |x| = 31 (corridor 20 + wings 3.7, with clearance; no collision).
+		if randf() < 0.06:
+			var yx := side * randf_range(40.0, 46.0)
+			var yz := z0 + randf_range(5.0, 30.0)
+			_add_landmark(level, "yali", yx, Level.terrain_height(yx, yz) - 0.3, yz, side)
+		elif randf() < 0.035:
+			var gx := side * randf_range(60.0, 74.0)
+			var gz := z0 + randf_range(5.0, 30.0)
+			_add_landmark(level, "galata", gx, Level.terrain_height(gx, gz) - 0.3, gz, side)
+		elif randf() < 0.02:
+			_add_landmark(level, "maiden", side * 31.0, -0.3, z0 + randf_range(5.0, 30.0), side)
+
+
+## A landmark with a front (+z): turned to face the water on either shore.
+func _add_landmark(level: Level, kind: String, x: float, y: float, z: float, side: float) -> void:
+	_add_prop(level, kind, Vector3(x, y, z), Vector3.ONE, Color.WHITE)
+	level.props[level.props.size() - 1].rot_y = landmark_turn(side)
+
+
+## +90 degrees on the left shore (x < 0), -90 on the right one, so the model's +z faces x = 0.
+static func landmark_turn(side: float) -> float:
+	return PI * 0.5 if side < 0.0 else -PI * 0.5
 
 
 # ---------- patterns: simit, fish, ships, kites, flocks, storms, power-ups ----------
@@ -182,7 +205,9 @@ func _flock_pattern(level: Level, z: float) -> void:
 	var o := _add_obstacle(level, "flock", randf_range(-12.0, 12.0), randf_range(6.0, 22.0), z + 40.0 if hostile else z - 20.0)
 	o.hostile = hostile
 	o.speed = -9.0 if hostile else 9.0
-	o.members = [Vector3(0, 0, 0), Vector3(-2.2, 1, -2.5), Vector3(2.2, 1, -2.5), Vector3(-4.4, 2, -5)]
+	# Followers trail behind the leader, against the flight direction, so the V points where it flies.
+	var back := -signf(o.speed)
+	o.members = [Vector3(0, 0, 0), Vector3(-2.2, 1, 2.5 * back), Vector3(2.2, 1, 2.5 * back), Vector3(-4.4, 2, 5.0 * back)]
 
 
 func _storm_pattern(level: Level, z: float) -> void:

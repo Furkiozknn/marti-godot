@@ -11,6 +11,8 @@ extends Node
 ##   --end-after=<s> end the run after this much run time (screenshots of game over)
 ##   --trace         print the game state (JSON) once per second
 ##   --d0=<metres>   start the run this far along the strait (shows the bridge sooner)
+##   --hold=<action> hold an input action for the whole session (e.g. steer_right: checks the steering)
+##   --no-assets     keep the procedural models instead of the generated ones (res://assets/models)
 
 var world: GameWorld
 var ui: GameUI
@@ -20,6 +22,7 @@ var _end_after: float = -1.0
 var _auto_timer: float = 0.0
 var _over_timer: float = 0.0
 var _touch_started_ms: int = 0
+var _touch_start := Vector2.ZERO
 var _trace: bool = false
 var _t0: float = 0.0
 var _d0: float = 0.0
@@ -42,12 +45,14 @@ func _ready() -> void:
 
 	world = GameWorld.new()
 	world.auto_bot = _auto_mode
+	world.title_clock_cap = maxf(60.0, _t0)
 	add_child(world)
 	ui = GameUI.new()
 	add_child(ui)
 	ui.set_world(world)
 	ui.start_pressed.connect(start_run)
 	ui.retry_pressed.connect(start_run)
+	ui.restart_pressed.connect(restart_run)
 	ui.resume_pressed.connect(resume_run)
 	ui.menu_pressed.connect(go_menu)
 	ui.pause_pressed.connect(toggle_pause)
@@ -79,6 +84,9 @@ func _ready() -> void:
 			_end_after = maxf(_end_after, 0.5)
 	if Cli.has_flag("--run"):
 		start_run()
+	var hold := Cli.value_of("--hold", "")
+	if InputMap.has_action(hold):
+		Input.action_press(hold)
 
 
 func _process(delta: float) -> void:
@@ -112,16 +120,29 @@ func _unhandled_input(event: InputEvent) -> void:
 		toggle_language()
 	elif event.is_action_pressed("pause"):
 		toggle_pause()
+	elif event.is_action_pressed("toggle_fullscreen"):
+		toggle_fullscreen()
 	elif event.is_action_pressed("confirm") or event.is_action_pressed("dive"):
 		_on_press_to_play()
 
+	var playing := GameState.phase == GameState.Phase.PLAYING and not _auto_mode
+	# Touch: a finger going down never moves the gull; dragging steers relative to where it went down,
+	# and a short tap without a drag dives.
 	if event is InputEventScreenTouch:
 		if event.pressed:
 			_touch_started_ms = Time.get_ticks_msec()
-		elif Time.get_ticks_msec() - _touch_started_ms < 300 and GameState.phase == GameState.Phase.PLAYING:
+			_touch_start = event.position
+			world.touch_begin(event.position)
+		elif Time.get_ticks_msec() - _touch_started_ms < 300 and event.position.distance_to(_touch_start) < 24.0 and playing:
 			world.dive_tap()
-	if (event is InputEventMouseMotion or event is InputEventScreenDrag) and GameState.phase == GameState.Phase.PLAYING and not _auto_mode:
+	elif event is InputEventScreenDrag and playing:
+		world.touch_drag(event.position)
+	# A real mouse steers by its position and dives while the left button is held. Mouse events that
+	# Godot emulates from touch are skipped, so a finger on the screen never dives or jumps the gull.
+	elif event is InputEventMouseMotion and event.device != InputEvent.DEVICE_ID_EMULATION and playing:
 		world.set_pointer_target(event.position)
+	elif event is InputEventMouseButton and event.device != InputEvent.DEVICE_ID_EMULATION and event.button_index == MOUSE_BUTTON_LEFT:
+		world.mouse_dive = event.pressed and playing
 
 
 func _on_press_to_play() -> void:
@@ -145,10 +166,19 @@ func start_run() -> void:
 	GameState.distance = _d0
 	world.begin_run()
 	world.dive_timer = 0.0
+	world.mouse_dive = false
 	_auto_timer = 0.0
 	_over_timer = 0.0
 	ui.show_screen("hud")
+	Sound.set_paused(false)
 	Sound.play("start")
+	ui.toast(Loc.t("fly"), "info")
+
+
+## Pause menu: throw the current run away and start a new one.
+func restart_run() -> void:
+	GameState.phase = GameState.Phase.TITLE
+	start_run()
 
 
 func go_menu() -> void:
@@ -157,12 +187,15 @@ func go_menu() -> void:
 	world.begin_run()
 	ui.show_screen("title")
 	_auto_timer = 0.0
+	Sound.set_paused(false)
 	Sound.start_music()
 
 
 func toggle_pause() -> void:
 	if GameState.phase == GameState.Phase.PLAYING:
 		GameState.pause()
+		world.mouse_dive = false
+		Sound.set_paused(true)
 		ui.show_screen("pause")
 	elif GameState.phase == GameState.Phase.PAUSED:
 		resume_run()
@@ -170,7 +203,16 @@ func toggle_pause() -> void:
 
 func resume_run() -> void:
 	GameState.resume()
+	Sound.set_paused(false)
+	Save.save_all()
 	ui.show_screen("hud")
+
+
+## Losing the window focus (another app, a hidden browser tab) pauses a run. The bot and Movie Maker keep going.
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_APPLICATION_FOCUS_OUT and GameState.phase == GameState.Phase.PLAYING and not _auto_mode \
+			and Engine.get_write_movie_path() == "":
+		toggle_pause()
 
 
 func _on_run_ended(run: Dictionary) -> void:
@@ -180,6 +222,7 @@ func _on_run_ended(run: Dictionary) -> void:
 		return
 	var is_new: bool = run["score"] > Save.best_score() and run["score"] > 0
 	Save.record_run(run)
+	Sound.play_game_over()
 	ui.show_over(run, is_new)
 	_over_timer = 0.0
 
@@ -191,7 +234,7 @@ func _on_message(key: String, tone: String) -> void:
 func _on_mission_completed(id: String) -> void:
 	if GameState.phase == GameState.Phase.PLAYING:
 		GameState.score += GameState.CONFIG.mission_bonus
-	ui.toast("%s: %s" % [Loc.t("mission_done"), Save.mission_def(id).text(Loc.lang())], "gold")
+	ui.toast("%s: %s" % [Loc.t("mission_done"), Save.mission_def(id).text(Loc.lang())], "good")
 	Sound.play("chime", 1.0)
 
 
@@ -217,6 +260,12 @@ func toggle_language() -> void:
 	ui.apply_texts()
 
 
+func toggle_fullscreen() -> void:
+	Save.settings["fullscreen"] = not Save.settings["fullscreen"]
+	_on_settings_changed()
+	ui.apply_texts()
+
+
 func _on_settings_changed() -> void:
 	Save.save_all()
 	Save.apply_display()
@@ -232,12 +281,15 @@ func _setup_input_map() -> void:
 	_add_action("steer_right", [_key(KEY_D), _key(KEY_RIGHT), _axis(JOY_AXIS_LEFT_X, 1.0)])
 	_add_action("steer_up", [_key(KEY_W), _key(KEY_UP), _axis(JOY_AXIS_LEFT_Y, -1.0)])
 	_add_action("steer_down", [_key(KEY_S), _key(KEY_DOWN), _axis(JOY_AXIS_LEFT_Y, 1.0)])
-	_add_action("dive", [_key(KEY_SPACE), _mouse(MOUSE_BUTTON_LEFT), _button(JOY_BUTTON_A)])
+	# The mouse button is not part of the dive action: _unhandled_input handles a real mouse, so the button
+	# Godot emulates from touch never dives (touch dives with a tap).
+	_add_action("dive", [_key(KEY_SPACE), _button(JOY_BUTTON_A)])
 	_add_action("pause", [_key(KEY_P), _key(KEY_ESCAPE), _button(JOY_BUTTON_START)])
 	_add_action("confirm", [_key(KEY_ENTER), _key(KEY_KP_ENTER), _button(JOY_BUTTON_A)])
 	_add_action("toggle_music", [_key(KEY_M)])
 	_add_action("toggle_sfx", [_key(KEY_X)])
 	_add_action("toggle_language", [_key(KEY_L)])
+	_add_action("toggle_fullscreen", [_key(KEY_F)])
 
 
 func _add_action(action_name: String, events: Array) -> void:
@@ -250,12 +302,6 @@ func _add_action(action_name: String, events: Array) -> void:
 func _key(code: Key) -> InputEventKey:
 	var ev := InputEventKey.new()
 	ev.physical_keycode = code
-	return ev
-
-
-func _mouse(button: MouseButton) -> InputEventMouseButton:
-	var ev := InputEventMouseButton.new()
-	ev.button_index = button
 	return ev
 
 

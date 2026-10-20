@@ -11,6 +11,15 @@ const GY := 0.55
 const GZ := 1.3
 const WATER_LEN := 560.0
 const WATER_BACK := 60.0
+## The sea and land planes have 113 rows of quads. Their z is snapped to one row, so the grid never
+## slides under the world-space waves and hills (no wobble).
+const WATER_ROWS := 113
+## Pickups more than this far behind the gull are hidden (out of reach; they would otherwise fly past
+## the chase camera and fill the screen). Kites and flock birds use HIDE_BEHIND_HAZARD.
+const HIDE_BEHIND_PICKUP := 3.0
+const HIDE_BEHIND_HAZARD := 4.0
+## Steering speed of the keys and stick, units per second.
+const STEER_SPEED := 18.0
 ## Day cycle keys, by run progress p (0 = morning, 0.7 = sunset, 1.0 = night).
 ## Each row: p, sun elevation (degrees), sun colour, zenith, horizon, ambient colour, ambient energy,
 ## sun energy, star amount. The sky, sun, fog and ambient light are blended between rows.
@@ -24,10 +33,29 @@ const SKY_KEYS := [
 	[1.0, -15.0, "#9AA8FF", "#060A1F", "#151B42", "#4B5FA8", 0.55, 0.0, 1.0],
 ]
 const MM_CAPACITY := {
-	"house": 340, "roof": 340, "tree": 260, "dome": 40, "minaret": 80, "balloon": 24, "cloud": 60,
-	"simit": 200, "fish": 60, "kite": 24, "kite_string": 24, "flock": 120,
+	"house": 340, "window": 340, "roof": 340, "tree": 260, "mosque": 30, "yali": 8, "galata": 8, "maiden": 6,
+	"balloon": 24, "cloud": 60, "simit": 200, "fish": 60, "kite": 24, "kite_string": 24, "flock": 120,
 }
-const PROP_KINDS := ["house", "roof", "tree", "dome", "minaret", "balloon", "cloud"]
+const PROP_KINDS := ["house", "roof", "tree", "mosque", "yali", "galata", "maiden", "balloon", "cloud"]
+## Landmarks drawn with the generated models (no instance tint). The procedural meshes are the fallback.
+const LANDMARK_KINDS := ["mosque", "yali", "galata", "maiden"]
+const FLOCK_SHADER := """
+shader_type spatial;
+render_mode cull_disabled;
+uniform float flap_time = 0.0;
+
+void vertex() {
+	// The wings (|x| > 0.6) flap with a phase per bird (INSTANCE_CUSTOM.x).
+	float wing_out = max(abs(VERTEX.x) - 0.6, 0.0);
+	VERTEX.y += wing_out * 0.35 * sin(flap_time * 9.0 + INSTANCE_CUSTOM.x);
+}
+
+void fragment() {
+	// Vertex colours are sRGB (the gull palette), tinted by the instance colour.
+	ALBEDO = pow(COLOR.rgb, vec3(2.2));
+	ROUGHNESS = 0.8;
+}
+"""
 ## Puffs (x, y, z, radius) of the cloud shapes. Props are scaled by their size; storms use the full size.
 const CLOUD_PUFFS := [[0.0, 0.0, 0.0, 0.3], [-0.25, -0.05, 0.05, 0.22], [0.24, 0.02, -0.04, 0.24], [0.02, 0.14, 0.02, 0.2]]
 const STORM_PUFFS := [[0.0, 0.0, 0.0, 5.0], [-5.5, -1.0, 1.0, 3.6], [5.2, -0.8, -0.8, 3.9], [-1.8, 3.0, 0.6, 3.4],
@@ -130,6 +158,10 @@ void sky() {
 
 ## Set by main: true when the bot drives the gull even during a real run (--auto).
 var auto_bot: bool = false
+## Set by main: the left mouse button is held (a real mouse, not one emulated from touch).
+var mouse_dive: bool = false
+## The title demo keeps its clock at or below this run time (a golden afternoon). main raises it to --t0.
+var title_clock_cap: float = 60.0
 var level := Level.new()
 var spawner := LevelSpawner.new()
 var bot := Bot.new()
@@ -160,9 +192,14 @@ var _boat_meshes: Dictionary = {}
 var _power_nodes_mesh: Dictionary = {}
 var _sky_keys: Array = []
 var _storm_mesh: ArrayMesh
-var _house_mat: StandardMaterial3D
+var _win_mat: StandardMaterial3D
+var _flock_mat: ShaderMaterial
+var _sparks: Sparks
+var _fireworks_fx: Sparks
 var _land_left: MeshInstance3D
 var _land_right: MeshInstance3D
+var _touch_start := Vector2.ZERO
+var _touch_target := Vector2.ZERO
 
 
 func _ready() -> void:
@@ -175,8 +212,14 @@ func _ready() -> void:
 	_build_sea()
 	_build_sky()
 	_build_multimeshes()
+	_sparks = Sparks.new(520, true, 0.6)
+	add_child(_sparks)
+	# Fireworks: no fog (they burst deep in it) and a sprite four times larger, else a pixel or two far away.
+	_fireworks_fx = Sparks.new(240, false, 2.4)
+	add_child(_fireworks_fx)
 	gull = Gull.new()
-	gull.scale = Vector3.ONE * 1.0
+	# Drawn 10% larger, as in the browser version; the hitbox (GX, GY, GZ) stays the same.
+	gull.scale = Vector3.ONE * 1.1
 	add_child(gull)
 	gull.flapped.connect(_on_flap)
 	camera = Camera3D.new()
@@ -199,6 +242,10 @@ func begin_run() -> void:
 	_dive_offset = 0.0
 	_gust = Vector2.ZERO
 	spawner.fill_ahead(level, GameState.distance, GameState.run_time, GameState.CONFIG.look_ahead)
+	# Put the gull and the camera in place at once, so a run that is paused straight away (or a
+	# screenshot) never shows them where they were before.
+	gull.position = Vector3(gull_x, gull_y, GameState.distance)
+	_update_camera(1.0)
 
 
 ## Applies the quality tier: low = 1024 hard shadows, no glow, fewer particles.
@@ -209,16 +256,43 @@ func apply_quality() -> void:
 	gull.set_trail(not _low)
 	for mmi in _mm.values():
 		(mmi as MultiMeshInstance3D).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	for kind in PROP_KINDS:
-		_mm[kind].cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
-## Steering from the mouse or a finger: the gull follows the pointer across the strait.
+## Steering from the mouse: the gull follows the pointer across the strait. The chase camera looks
+## along +z, so the screen's right is world -x: the pointer's right half gives a negative target_x.
 func set_pointer_target(screen_pos: Vector2) -> void:
 	var size := get_viewport().get_visible_rect().size
 	var cfg := GameState.CONFIG
-	target_x = clampf(screen_pos.x / size.x * 2.0 - 1.0, -1.0, 1.0) * cfg.corridor
+	target_x = -clampf(screen_pos.x / size.x * 2.0 - 1.0, -1.0, 1.0) * cfg.corridor
 	target_y = lerpf(cfg.max_height, 3.0, clampf(screen_pos.y / size.y, 0.0, 1.0))
+
+
+## Touch steering is relative: a finger going down never moves the gull (so a tap only dives);
+## dragging moves the target by the drag distance from where the finger went down.
+func touch_begin(screen_pos: Vector2) -> void:
+	_touch_start = screen_pos
+	_touch_target = Vector2(target_x, target_y)
+
+
+func touch_drag(screen_pos: Vector2) -> void:
+	var size := get_viewport().get_visible_rect().size
+	var cfg := GameState.CONFIG
+	var drag := screen_pos - _touch_start
+	target_x = clampf(_touch_target.x - drag.x / size.x * 2.0 * cfg.corridor * 1.4, -cfg.corridor, cfg.corridor)
+	target_y = clampf(_touch_target.y - drag.y / size.y * (cfg.max_height - 3.0) * 1.4, cfg.min_height, cfg.max_height)
+
+
+## Keys and stick: axis.x > 0 is "steer right", which is world -x (see set_pointer_target).
+func steer_by(axis: Vector2, dt: float) -> void:
+	var cfg := GameState.CONFIG
+	target_x = clampf(target_x - axis.x * dt * STEER_SPEED, -cfg.corridor, cfg.corridor)
+	target_y = clampf(target_y + axis.y * dt * 16.0, cfg.min_height, cfg.max_height)
+
+
+func is_diving() -> bool:
+	if GameState.phase != GameState.Phase.PLAYING or auto_bot:
+		return false
+	return Input.is_action_pressed("dive") or mouse_dive or dive_timer > 0.0
 
 
 func dive_tap() -> void:
@@ -243,15 +317,17 @@ func _simulate(dt: float) -> void:
 	var cfg := GameState.CONFIG
 	dive_timer = maxf(0.0, dive_timer - dt)
 	GameState.tick(dt)
+	if GameState.phase == GameState.Phase.TITLE:
+		GameState.run_time = minf(GameState.run_time, title_clock_cap)
 
 	if playing and not auto_bot:
-		_keyboard_steer(dt)
+		steer_by(Input.get_vector("steer_left", "steer_right", "steer_down", "steer_up"), dt)
 	else:
 		var lane := bot.think(dt, level, GameState.distance, Vector2(gull_x, gull_y))
 		target_x = lane.x
 		target_y = lane.y
 
-	var diving := playing and not auto_bot and (Input.is_action_pressed("dive") or dive_timer > 0.0)
+	var diving := is_diving()
 	_dive_offset += ((-9.0 if diving else 0.0) - _dive_offset) * minf(1.0, dt * 5.0)
 	target_y = clampf(target_y, cfg.min_height, cfg.max_height)
 	var ty := clampf(target_y + _dive_offset, cfg.min_height - 1.0, cfg.max_height)
@@ -275,7 +351,7 @@ func _simulate(dt: float) -> void:
 	if GameState.phase == GameState.Phase.PLAYING:
 		GameState.drain_stamina(dt, diving)
 		if diving and gull_y < 2.6 and randf() < dt * 6.0:
-			Fx.burst(self, Vector3(gull_x, 0.4, GameState.distance), Color.html("#E0F2FE"), _amount(3), 5.0, 0.6, 9.0)
+			_sparks.burst(Vector3(gull_x, 0.4, GameState.distance), Color.html("#E0F2FE"), _amount(3), 5.0, 0.6, 9.0)
 		if randf() < dt * 0.1:
 			Sound.play("call")
 
@@ -286,14 +362,8 @@ func _simulate(dt: float) -> void:
 	_shake = maxf(0.0, _shake - dt * 2.4)
 
 
-func _keyboard_steer(dt: float) -> void:
-	var cfg := GameState.CONFIG
-	var axis := Input.get_vector("steer_left", "steer_right", "steer_down", "steer_up")
-	target_x = clampf(target_x + axis.x * dt * 18.0, -cfg.corridor, cfg.corridor)
-	target_y = clampf(target_y + axis.y * dt * 16.0, cfg.min_height, cfg.max_height)
-
-
 func _move_entities(dt: float) -> void:
+	var playing := GameState.phase == GameState.Phase.PLAYING
 	for p in level.pickups:
 		if p.follow:
 			p.z = p.follow.z + p.follow_offset
@@ -301,6 +371,10 @@ func _move_entities(dt: float) -> void:
 		match o.kind:
 			"boat":
 				o.z += o.speed * dt
+				# A ferry sounds its horn once, when it comes within 90 units.
+				if playing and not o.horned and o.boat.id == "ferry" and absf(o.z - GameState.distance) < 90.0:
+					o.horned = true
+					Sound.play("horn")
 			"flock":
 				o.z += o.speed * dt
 				o.x += sin(_time * 0.6 + o.phase) * dt * 2.0
@@ -329,17 +403,20 @@ func _check_hits() -> void:
 		if o.kind == "storm" and absf(d - o.z) < 16.0 and absf(gull_x - o.sway) < 13.0 and absf(gull_y - o.y) < 8.0:
 			_gust = Vector2(sin(_time * 2.2 + o.phase) * 9.0, cos(_time * 1.7 + o.phase) * 4.0)
 			if randf() < 0.08 * _fx_scale:
-				Fx.burst(self, Vector3(gull_x + randf_range(-6.0, 6.0), gull_y + randf_range(2.0, 8.0), d), Color.html("#93C5FD"), 3, 4.0, 0.5, 4.0)
+				_sparks.burst(Vector3(gull_x + randf_range(-6.0, 6.0), gull_y + randf_range(2.0, 8.0), d), Color.html("#93C5FD"), 3, 4.0, 0.5, 4.0)
 
 
 func _on_hit() -> void:
+	# Still blinking from the last hit: ignore it silently (no burst, no sound on every frame of overlap).
+	if GameState.invuln > 0.0:
+		return
 	if GameState.take_hit():
-		Fx.burst(self, Vector3(gull_x, gull_y, GameState.distance), Color.html("#E0F2FE"), _amount(16), 7.0, 0.9, 6.0)
+		_sparks.burst(Vector3(gull_x, gull_y, GameState.distance), Color.html("#E0F2FE"), _amount(16), 7.0, 0.9, 6.0)
 		Sound.play("hit", 0.7)
 		return
 	_shake = 0.9
 	target_x = clampf(target_x + (-5.0 if gull_x > 0.0 else 5.0), -GameState.CONFIG.corridor, GameState.CONFIG.corridor)
-	Fx.burst(self, Vector3(gull_x, gull_y, GameState.distance), Color.WHITE, _amount(22), 9.0, 1.1, 9.0)
+	_sparks.burst(Vector3(gull_x, gull_y, GameState.distance), Color.WHITE, _amount(22), 9.0, 1.1, 9.0)
 	Sound.play("hit")
 
 
@@ -355,7 +432,7 @@ func _check_flock_steals() -> void:
 			var mz := o.z + m.z
 			if absf(mz - d) < 2.4 and absf(mx - gull_x) < 2.4 and absf(my - gull_y) < 2.4:
 				o.members.remove_at(i)
-				Fx.burst(self, Vector3(mx, my, mz), Color.html("#F59E0B"), _amount(12), 6.0, 0.7, 6.0)
+				_sparks.burst(Vector3(mx, my, mz), Color.html("#F59E0B"), _amount(12), 6.0, 0.7, 6.0)
 				GameState.steal_food()
 				Sound.play("steal")
 				if GameState.phase != GameState.Phase.PLAYING:
@@ -373,7 +450,7 @@ func _check_pickups() -> void:
 					p.dead = true
 					var pts := GameState.collect_simit()
 					Sound.play("chime", pow(2.0, float(GameState.combo % 12) / 12.0))
-					Fx.burst(self, Vector3(p.x, p.y, p.z), Color.html("#FDE68A"), _amount(10), 6.0, 0.6, 7.0)
+					_sparks.burst(Vector3(p.x, p.y, p.z), Color.html("#FDE68A"), _amount(10), 6.0, 0.6, 7.0)
 					popup.emit("+%d" % pts, Vector3(p.x, p.y + 1.0, p.z))
 			"fish":
 				var u := (d - p.fish_start) / p.fish_length
@@ -384,7 +461,7 @@ func _check_pickups() -> void:
 					p.dead = true
 					var pts := GameState.collect_fish()
 					Sound.play("chime", pow(2.0, float(GameState.combo % 12) / 12.0))
-					Fx.burst(self, Vector3(p.x, fy, p.z), Color.html("#BAE6FD"), _amount(14), 8.0, 0.7, 9.0)
+					_sparks.burst(Vector3(p.x, fy, p.z), Color.html("#BAE6FD"), _amount(14), 8.0, 0.7, 9.0)
 					popup.emit("+%d" % pts, Vector3(p.x, fy + 1.0, p.z))
 			_:
 				if absf(p.z - d) < 2.8 and absf(p.x - gull_x) < 2.8 and absf(p.y - gull_y) < 2.8:
@@ -395,11 +472,16 @@ func _check_pickups() -> void:
 						color = Color.html("#E0F2FE")
 					elif p.kind == "gold":
 						color = Color.html("#FBBF24")
-					Fx.burst(self, Vector3(p.x, p.y, p.z), color, _amount(26), 10.0, 0.9, 4.0)
+					_sparks.burst(Vector3(p.x, p.y, p.z), color, _amount(26), 10.0, 0.9, 4.0)
 					Sound.play("whoosh")
 					popup.emit("+%d" % GameState.CONFIG.power_points, Vector3(p.x, p.y + 1.5, p.z))
 					_free_node(p.node)
 					p.node = null
+
+
+## Fish pitch along the leap (radians about x): nose up while rising, down while falling.
+static func fish_pitch(u: float) -> float:
+	return -0.9 * cos(clampf(u, 0.0, 2.0) * PI / 2.0)
 
 
 func _fish_y(p: Level.Pickup, u: float) -> float:
@@ -425,9 +507,9 @@ func _render(dt: float) -> void:
 	var playing := GameState.phase == GameState.Phase.PLAYING
 	var p := clampf(GameState.run_time / 170.0, 0.0, 1.0)
 	var night := _smooth(0.6, 0.78, p)
-	var diving := playing and not auto_bot and (Input.is_action_pressed("dive") or dive_timer > 0.0)
+	var diving := is_diving()
 
-	water.position.z = d + WATER_LEN * 0.5 - WATER_BACK
+	water.position.z = snappedf(d + WATER_LEN * 0.5 - WATER_BACK, WATER_LEN / WATER_ROWS)
 	for land in [_land_left, _land_right]:
 		land.position.z = water.position.z
 
@@ -441,8 +523,6 @@ func _render(dt: float) -> void:
 	gull.position = Vector3(gull_x, gull_y, d)
 	gull.visible = not (GameState.invuln > 0.0 and int(_time * 12.0) % 2 == 0 and playing)
 	gull.animate(dt, diving, GameState.speed / 40.0, _bank, pitch)
-	if playing and not auto_bot and diving and gull_y < 3.0 and randf() < dt * 8.0:
-		Fx.burst(self, Vector3(gull_x, 0.3, d), Color.html("#E0F2FE"), _amount(6), 4.0, 0.5, 9.0)
 
 	_update_camera(dt)
 	_update_sky(p, night, d)
@@ -488,8 +568,8 @@ func _update_sky(p: float, night: float, d: float) -> void:
 	sky_mat.set_shader_parameter("star_amount", k["stars"])
 	sky_mat.set_shader_parameter("moon_dir", Vector3(-0.35, 0.55, 0.75).normalized())
 	water_mat.set_shader_parameter("sky_col", k["horizon"])
-	_house_mat.emission_enabled = night > 0.01
-	_house_mat.emission = Color(0.3, 0.17, 0.05) * night
+	# Night: only the windows glow warm. emission_enabled stays on, so no shader variant is compiled at dusk.
+	_win_mat.emission = Color.html("#FFB347") * night
 
 
 ## Interpolates SKY_KEYS at progress p. Returns a Dictionary of colours and numbers.
@@ -527,16 +607,23 @@ func _smooth(a: float, b: float, x: float) -> float:
 func _render_props(night: float) -> void:
 	if level.props_dirty:
 		var counts := {}
+		var windows: MultiMesh = _mm["window"].multimesh
 		for pr in level.props:
-			var mmi: MultiMeshInstance3D = _mm[pr.kind]
+			var mm: MultiMesh = _mm[pr.kind].multimesh
 			var idx: int = counts.get(pr.kind, 0)
-			if idx >= mmi.multimesh.instance_count:
+			if idx >= mm.instance_count:
 				continue
 			counts[pr.kind] = idx + 1
-			mmi.multimesh.set_instance_transform(idx, Transform3D(Basis.from_scale(pr.size), pr.pos))
-			mmi.multimesh.set_instance_color(idx, pr.color)
+			var xf := Transform3D(Basis(Vector3.UP, pr.rot_y) * Basis.from_scale(pr.size), pr.pos)
+			mm.set_instance_transform(idx, xf)
+			if mm.use_colors:
+				mm.set_instance_color(idx, pr.color)
+			# The windows reuse the house transforms (one more draw call for every house).
+			if pr.kind == "house":
+				windows.set_instance_transform(idx, xf)
 		for kind in PROP_KINDS:
 			_mm[kind].multimesh.visible_instance_count = counts.get(kind, 0)
+		windows.visible_instance_count = counts.get("house", 0)
 		level.props_dirty = false
 	var balloon := 0
 	var mm_balloon: MultiMesh = _mm["balloon"].multimesh
@@ -579,26 +666,30 @@ func _render_pickups() -> void:
 	var n_simit := 0
 	var n_fish := 0
 	var d := GameState.distance
+	var behind := d - HIDE_BEHIND_PICKUP
 	for p in level.pickups:
 		if p.dead:
 			continue
 		match p.kind:
 			"simit":
-				if n_simit < simit_mm.instance_count:
-					var pos := Vector3(p.x, p.y + sin(_time * 3.0 + p.phase) * 0.3, p.z)
-					simit_mm.set_instance_transform(n_simit, Transform3D(Basis(Vector3.UP, _time * 1.6 + p.phase).scaled(Vector3.ONE * 0.8), pos))
-					n_simit += 1
+				if p.z < behind or n_simit >= simit_mm.instance_count:
+					continue
+				# The ring stands upright (hole along z) and spins about y.
+				var pos := Vector3(p.x, p.y + sin(_time * 3.0 + p.phase) * 0.3, p.z)
+				simit_mm.set_instance_transform(n_simit, Transform3D(Basis(Vector3.UP, _time * 1.6 + p.phase), pos))
+				n_simit += 1
 			"fish":
 				var u := (d - p.fish_start) / p.fish_length
-				if u < -0.02 or u > 1.6 or n_fish >= fish_mm.instance_count:
+				if u < -0.02 or u > 1.6 or p.z < behind or n_fish >= fish_mm.instance_count:
 					continue
 				var pos_f := Vector3(p.x, _fish_y(p, u), p.z)
-				fish_mm.set_instance_transform(n_fish, Transform3D(Basis.from_scale(Vector3.ONE), pos_f))
+				fish_mm.set_instance_transform(n_fish, Transform3D(Basis.from_euler(Vector3(fish_pitch(u), 0.0, 0.0)), pos_f))
 				n_fish += 1
 			_:
 				if p.node == null:
 					p.node = _make_power(p.kind)
 					add_child(p.node)
+				p.node.visible = p.z > behind
 				p.node.position = Vector3(p.x, p.y + sin(_time * 2.2 + p.phase) * 0.4, p.z)
 				p.node.rotation = Vector3(0.0, _time * 2.0 + p.phase, 0.0)
 	simit_mm.visible_instance_count = n_simit
@@ -611,20 +702,26 @@ func _render_kites_and_flock() -> void:
 	var flock_mm: MultiMesh = _mm["flock"].multimesh
 	var n_kite := 0
 	var n_flock := 0
+	var behind := GameState.distance - HIDE_BEHIND_HAZARD
+	_flock_mat.set_shader_parameter("flap_time", _time)
 	for o in level.obstacles:
-		if o.kind == "kite" and n_kite < kite_mm.instance_count:
+		if o.kind == "kite" and o.z >= behind and n_kite < kite_mm.instance_count:
 			kite_mm.set_instance_transform(n_kite, Transform3D(Basis.from_scale(Vector3(1.5, 1.5, 0.15)), Vector3(o.sway, o.y, o.z)))
 			kite_mm.set_instance_color(n_kite, o.color)
 			string_mm.set_instance_transform(n_kite, Transform3D(Basis.from_scale(Vector3(0.12, o.y, 0.12)), Vector3(o.sway, o.y * 0.5, o.z)))
 			n_kite += 1
 		elif o.kind == "flock":
 			var facing := Basis(Vector3.UP, PI) if o.speed < 0.0 else Basis()
-			for m in o.members:
+			for i in o.members.size():
+				var m := o.members[i]
 				if n_flock >= flock_mm.instance_count:
 					break
+				if o.z + m.z < behind:
+					continue
 				var pos := Vector3(o.x + m.x, o.y + m.y + sin(_time * 4.0 + o.phase) * 0.2, o.z + m.z)
 				flock_mm.set_instance_transform(n_flock, Transform3D(facing, pos))
-				flock_mm.set_instance_color(n_flock, Color(0.17, 0.18, 0.21) if o.hostile else Color.WHITE)
+				flock_mm.set_instance_color(n_flock, Color.html("#2B2F36") if o.hostile else Color.WHITE)
+				flock_mm.set_instance_custom_data(n_flock, Color(o.phase + i * 1.3, 0.0, 0.0, 0.0))
 				n_flock += 1
 	kite_mm.visible_instance_count = n_kite
 	string_mm.visible_instance_count = n_kite
@@ -648,7 +745,8 @@ func _free_node(n: Node3D) -> void:
 func _fireworks(d: float) -> void:
 	var colors := ["#FDE68A", "#F87171", "#60A5FA", "#34D399", "#F472B6", "#FFFFFF"]
 	var c := Color.html(colors[randi() % colors.size()])
-	Fx.burst(self, Vector3(randf_range(-50.0, 50.0), randf_range(40.0, 70.0), d + randf_range(140.0, 240.0)), c, _amount(30), 14.0, 1.6, 9.0)
+	# Fireworks burst 140-240 units ahead, inside the fog (110-320): their pool ignores the fog.
+	_fireworks_fx.burst(Vector3(randf_range(-50.0, 50.0), randf_range(40.0, 70.0), d + randf_range(140.0, 240.0)), c, _amount(30), 14.0, 1.6, 9.0)
 	Sound.play("boom")
 
 
@@ -724,41 +822,34 @@ func _build_sky() -> void:
 
 func _build_multimeshes() -> void:
 	var house := BoxMesh.new()
-	_house_mat = MeshKit.vertex_material()
-	house.material = _house_mat
+	house.material = MeshKit.vertex_material()
 	_add_mm("house", house, true)
-	var roof := BoxMesh.new()
-	roof.material = MeshKit.vertex_material()
-	_add_mm("roof", roof, true)
+	_win_mat = StandardMaterial3D.new()
+	_win_mat.albedo_color = Color.html("#1E293B")
+	_win_mat.roughness = 0.6
+	_win_mat.emission_enabled = true
+	_win_mat.emission = Color.BLACK
+	_add_mm("window", _window_mesh(_win_mat), false)
+	_add_mm("roof", _roof_mesh(), true)
 	var tree := CylinderMesh.new()
 	tree.top_radius = 0.0
 	tree.bottom_radius = 0.5
 	tree.height = 1.0
 	tree.material = MeshKit.vertex_material()
 	_add_mm("tree", tree, true)
-	var dome := SphereMesh.new()
-	dome.radius = 0.5
-	dome.height = 1.0
-	dome.material = MeshKit.vertex_material()
-	_add_mm("dome", dome, true)
-	var minaret := CylinderMesh.new()
-	minaret.top_radius = 0.25
-	minaret.bottom_radius = 0.35
-	minaret.height = 1.0
-	minaret.material = MeshKit.vertex_material()
-	_add_mm("minaret", minaret, true)
+	for kind: String in LANDMARK_KINDS:
+		var model := Models.mesh(kind)
+		_add_mm(kind, model if model else Landmarks.fallback(kind), false)
 	var balloon := SphereMesh.new()
 	balloon.radius = 0.5
 	balloon.height = 1.0
 	balloon.material = MeshKit.vertex_material()
 	_add_mm("balloon", balloon, true)
 	_add_mm("cloud", _puff_mesh(CLOUD_PUFFS, MeshKit.vertex_material()), true)
-	var simit := TorusMesh.new()
-	simit.inner_radius = 0.5
-	simit.outer_radius = 1.2
-	simit.material = _shader_free_material(Color.html("#C98A3E"))
-	_add_mm("simit", simit, false)
-	_add_mm("fish", _fish_mesh(), false)
+	var simit := Models.mesh("simit")
+	_add_mm("simit", simit if simit else _torus_mesh(0.5, 1.2, Color.html("#C98A3E"), 0.8), false)
+	var fish := Models.mesh("fish")
+	_add_mm("fish", fish if fish else _fish_mesh(), false)
 	var kite := SphereMesh.new()
 	kite.radius = 1.0
 	kite.height = 2.0
@@ -769,13 +860,16 @@ func _build_multimeshes() -> void:
 	var string_box := BoxMesh.new()
 	string_box.material = _shader_free_material(Color(0.9, 0.9, 0.9))
 	_add_mm("kite_string", string_box, false)
-	_add_mm("flock", _bird_mesh(), true)
+	_add_mm("flock", Gull.rival_mesh(), true, true)
+	_flock_mat = _shader_material(FLOCK_SHADER)
+	_mm["flock"].material_override = _flock_mat
 
 
-func _add_mm(kind: String, mesh: Mesh, use_colors: bool) -> void:
+func _add_mm(kind: String, mesh: Mesh, use_colors: bool, use_custom: bool = false) -> void:
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.use_colors = use_colors
+	mm.use_custom_data = use_custom
 	mm.mesh = mesh
 	mm.instance_count = MM_CAPACITY[kind]
 	mm.visible_instance_count = 0
@@ -786,21 +880,59 @@ func _add_mm(kind: String, mesh: Mesh, use_colors: bool) -> void:
 	_mm[kind] = node
 
 
-## A flat rival or friendly gull: a body and two wings, drawn with boxes.
-func _bird_mesh() -> ArrayMesh:
+## Night windows: two rows of two dark quads on each side of the unit house box (drawn with the house
+## transforms, so they stretch with each house).
+func _window_mesh(mat: Material) -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	var white := Color.WHITE
-	MeshKit.add_box(st, Transform3D(Basis(), Vector3.ZERO), Vector3(0.8, 0.6, 1.6), white)
-	MeshKit.add_box(st, Transform3D(Basis(), Vector3(1.45, 0.0, -0.1)), Vector3(2.9, 0.16, 1.2), white)
-	MeshKit.add_box(st, Transform3D(Basis(), Vector3(-1.45, 0.0, -0.1)), Vector3(2.9, 0.16, 1.2), white)
+	var hw := 0.09
+	var hh := 0.1
+	for f in 4:
+		var turn := Basis(Vector3.UP, f * PI * 0.5)
+		for wy: float in [-0.18, 0.18]:
+			for wx: float in [-0.2, 0.2]:
+				var xf := Transform3D(turn, Vector3.ZERO)
+				MeshKit.add_quad(st, xf, Color.WHITE, Vector3(wx - hw, wy - hh, 0.505), Vector3(wx + hw, wy - hh, 0.505),
+					Vector3(wx + hw, wy + hh, 0.505), Vector3(wx - hw, wy + hh, 0.505), Vector3.BACK)
+	st.set_material(mat)
+	return st.commit()
+
+
+## A four-sided pyramid with its base at y = 0 (1 x 1) and its tip at y = 1, lined up with the house box.
+func _roof_mesh() -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var tip := Vector3(0.0, 1.0, 0.0)
+	var corners := [Vector3(-0.5, 0.0, -0.5), Vector3(0.5, 0.0, -0.5), Vector3(0.5, 0.0, 0.5), Vector3(-0.5, 0.0, 0.5)]
+	for i in 4:
+		var a: Vector3 = corners[i]
+		var b: Vector3 = corners[(i + 1) % 4]
+		var n := (b - a).cross(tip - a).normalized()
+		var mid := (a + b) * 0.5
+		if n.dot(Vector3(mid.x, 0.0, mid.z)) < 0.0:
+			n = -n
+		# A degenerate quad (two corners at the tip) keeps MeshKit's winding rule.
+		MeshKit.add_quad(st, Transform3D(), Color.WHITE, a, b, tip, tip, n)
+	st.set_material(MeshKit.vertex_material())
+	return st.commit()
+
+
+## A torus standing upright (hole along z), for the procedural simit and the tailwind ring.
+func _torus_mesh(inner: float, outer: float, color: Color, scale_k: float) -> ArrayMesh:
+	var torus := TorusMesh.new()
+	torus.inner_radius = inner
+	torus.outer_radius = outer
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	MeshKit.add_primitive(st, torus, Transform3D(Basis(Vector3.RIGHT, PI * 0.5).scaled(Vector3.ONE * scale_k), Vector3.ZERO), color)
 	st.set_material(MeshKit.vertex_material())
 	return st.commit()
 
 
 func _make_boat(bt: BoatType) -> MeshInstance3D:
 	if not _boat_meshes.has(bt.id):
-		_boat_meshes[bt.id] = bt.build_mesh()
+		var model: ArrayMesh = Models.mesh(bt.model) if bt.model != "" else null
+		_boat_meshes[bt.id] = model if model else bt.build_mesh()
 	var mi := MeshInstance3D.new()
 	mi.mesh = _boat_meshes[bt.id]
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF if _low else GeometryInstance3D.SHADOW_CASTING_SETTING_ON
@@ -861,25 +993,34 @@ func _append_puffs(st: SurfaceTool, puffs: Array) -> void:
 		st.append_from(sphere, 0, xf)
 
 
+## Power-ups: the golden simit is the simit model x1.3 with a gold tint and glow, the shield is the
+## feather model, and the tailwind stays a green ring standing upright.
 func _make_power(kind: String) -> MeshInstance3D:
 	if not _power_nodes_mesh.has(kind):
-		var m: PrimitiveMesh
-		if kind == "shield":
+		var entry := {"mesh": null, "mat": null, "scale": 1.0}
+		if kind == "gold" and Models.mesh("simit"):
+			entry = {"mesh": Models.mesh("simit"), "scale": 1.3,
+				"mat": Models.tinted_material("simit", Color.html("#FFC94D"), Color.html("#7A4A00"))}
+		elif kind == "shield" and Models.mesh("feather"):
+			entry["mesh"] = Models.mesh("feather")
+		elif kind == "shield":
 			var cone := CylinderMesh.new()
 			cone.top_radius = 0.0
 			cone.bottom_radius = 0.45
 			cone.height = 2.2
-			m = cone
+			cone.material = _shader_free_material(Color.html("#E0F2FE"))
+			entry["mesh"] = cone
+		elif kind == "gold":
+			entry["mesh"] = _torus_mesh(0.4, 0.8, Color.html("#F59E0B"), 1.0)
 		else:
-			var torus := TorusMesh.new()
-			torus.inner_radius = 0.4 if kind == "gold" else 0.9
-			torus.outer_radius = 0.8 if kind == "gold" else 1.2
-			m = torus
-		var colors := {"tail": "#34D399", "gold": "#F59E0B", "shield": "#E0F2FE"}
-		m.material = _shader_free_material(Color.html(colors[kind]))
-		_power_nodes_mesh[kind] = m
+			entry["mesh"] = _torus_mesh(0.9, 1.2, Color.html("#34D399"), 1.0)
+		_power_nodes_mesh[kind] = entry
+	var e: Dictionary = _power_nodes_mesh[kind]
 	var mi := MeshInstance3D.new()
-	mi.mesh = _power_nodes_mesh[kind]
+	mi.mesh = e["mesh"]
+	if e["mat"]:
+		mi.material_override = e["mat"]
+	mi.scale = Vector3.ONE * float(e["scale"])
 	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	return mi
 

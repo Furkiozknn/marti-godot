@@ -20,6 +20,19 @@ func _ready() -> void:
 	_test_spawner_and_bot()
 	_test_terrain_and_mesh()
 	_test_state_text()
+	_test_collision_boxes()
+	_test_flock_and_landmarks()
+	_test_models()
+	_test_music_loop()
+	var world := GameWorld.new()
+	add_child(world)
+	_test_steering(world)
+	_test_hit_spam(world)
+	_test_hidden_pickups(world)
+	_test_title_clock(world)
+	world.queue_free()
+	GameState.reset_run()
+	GameState.phase = GameState.Phase.TITLE
 	var failed := _total - _passed
 	if failed == 0:
 		print("TESTS PASSED %d/%d" % [_passed, _total])
@@ -152,3 +165,127 @@ func _test_terrain_and_mesh() -> void:
 func _test_state_text() -> void:
 	var parsed: Variant = JSON.parse_string(GameState.get_state_text())
 	_check(typeof(parsed) == TYPE_DICTIONARY and (parsed as Dictionary).has("score"), "state text is a JSON object with a score")
+
+
+## True when a point (boat space) is inside one of the boat's collision boxes.
+func _solid(bt: BoatType, p: Vector3) -> bool:
+	for b in bt.collision_boxes():
+		if b.has_point(p):
+			return true
+	return false
+
+
+func _test_collision_boxes() -> void:
+	var ferry := load("res://data/boats/ferry.tres") as BoatType
+	var top := 0.0
+	for b in ferry.collision_boxes():
+		top = maxf(top, b.end.y)
+	_check(_solid(ferry, Vector3(2.0, 3.5, -1.5)), "the ferry cabin is solid")
+	_check(top <= 4.5 and 5.3 - GameWorld.GY > top, "the deck simit at y 5.3 stays above the ferry cabin")
+	var tanker := load("res://data/boats/tanker.tres") as BoatType
+	_check(_solid(tanker, Vector3(1.9, 6.0, -13.0)), "the tanker bridge block is solid")
+	var fishing := load("res://data/boats/fishing.tres") as BoatType
+	_check(_solid(fishing, Vector3(0.0, 2.5, -0.8)) and _solid(fishing, Vector3(0.0, 4.5, 0.9)), "the fishing cabin and mast are solid")
+	var sail := load("res://data/boats/sail.tres") as BoatType
+	_check(_solid(sail, Vector3(0.0, 10.0, -0.8)) and _solid(sail, Vector3(0.0, 20.0, 0.5)), "the sail and the mast are solid")
+
+
+func _test_flock_and_landmarks() -> void:
+	var level := Level.new()
+	var spawner := LevelSpawner.new()
+	for i in 6:
+		spawner._flock_pattern(level, 100.0 + i)
+	var ok := true
+	for o in level.obstacles:
+		for m in o.members:
+			if m.z * o.speed > 0.0:
+				ok = false
+	_check(ok, "flock followers trail behind the leader (the V points where it flies)")
+	for side: float in [-1.0, 1.0]:
+		var front := Basis(Vector3.UP, LevelSpawner.landmark_turn(side)) * Vector3.BACK
+		_check(front.dot(Vector3(-side, 0.0, 0.0)) > 0.99, "a landmark on side %d faces the water" % int(side))
+	_check(GameWorld.fish_pitch(0.0) < 0.0 and GameWorld.fish_pitch(2.0) > 0.0, "fish point nose up when rising and down when falling")
+
+
+func _test_models() -> void:
+	var simit := Models.mesh("simit")
+	_check(simit != null and simit.get_surface_count() == 1, "the simit model loads as one surface")
+	if simit:
+		var box := simit.get_aabb()
+		_check(absf(box.size.x - 2.34) < 0.05 and box.size.z < 1.0, "the simit model stands upright (ring in the xy plane)")
+		_check((simit.surface_get_material(0) as StandardMaterial3D).albedo_texture != null, "the simit model keeps its texture")
+	var ferry := Models.mesh("ferry")
+	_check(ferry != null and ferry.get_aabb().end.y <= 4.8, "the ferry model loads and stays under the deck simit")
+	for m in ["fish", "feather", "fishing", "sail", "mosque", "galata", "maiden", "yali"]:
+		_check(Models.mesh(m) != null, "model %s loads" % m)
+	var rival := Gull.rival_mesh().get_aabb()
+	_check(rival.size.x > 7.0 and rival.size.x < 7.4, "the rival gull spans about 7.2 units")
+
+
+func _test_music_loop() -> void:
+	var bars_seconds := Sound.MUSIC_BARS * 16 * Sound.STEP
+	_check(absf(Sound.loop_frames() / float(Sound.RATE) - bars_seconds) < 0.001, "the music loop is exactly four bars long (no gap)")
+
+
+## The chase camera looks along +z, so its right is world -x. Steering right must move the gull to the
+## right of the screen, with the keys, the mouse and a finger drag.
+func _test_steering(world: GameWorld) -> void:
+	GameState.start_run()
+	world.begin_run()
+	world.target_x = 0.0
+	world.steer_by(Vector2(1.0, 0.0), 0.5)
+	var key_delta := world.target_x
+	for i in 30:
+		world._update_camera(0.05)
+	var right := world.camera.global_transform.basis.x
+	_check(right.dot(Vector3(key_delta, 0.0, 0.0)) > 0.0, "steer right moves the target to the camera's right")
+	var size := world.get_viewport().get_visible_rect().size
+	world.set_pointer_target(Vector2(size.x * 0.9, size.y * 0.5))
+	_check(right.dot(Vector3(world.target_x, 0.0, 0.0)) > 0.0, "the pointer on the right half steers to the camera's right")
+	var centre := world.camera.unproject_position(Vector3(0.0, world.gull_y, GameState.distance))
+	var at_target := world.camera.unproject_position(Vector3(world.target_x, world.gull_y, GameState.distance))
+	_check(at_target.x > centre.x, "the steering target projects right of the screen centre")
+	world.target_x = 0.0
+	world.touch_begin(Vector2(size.x * 0.5, size.y * 0.5))
+	_check(world.target_x == 0.0, "a finger going down does not move the gull")
+	world.touch_drag(Vector2(size.x * 0.6, size.y * 0.5))
+	_check(right.dot(Vector3(world.target_x, 0.0, 0.0)) > 0.0, "dragging a finger right steers to the camera's right")
+
+
+func _test_hit_spam(world: GameWorld) -> void:
+	GameState.start_run()
+	GameState.invuln = 1.0
+	var lives := GameState.lives
+	var sprites := world._sparks._next
+	world._on_hit()
+	_check(GameState.lives == lives and world._sparks._next == sprites, "a hit while blinking is ignored (no burst, no sound)")
+	GameState.invuln = 0.0
+
+
+func _test_hidden_pickups(world: GameWorld) -> void:
+	GameState.start_run()
+	GameState.distance = 500.0
+	world.level.pickups.clear()
+	for z: float in [490.0, 498.0, 510.0]:
+		var p := Level.Pickup.new()
+		p.kind = "simit"
+		p.z = z
+		world.level.pickups.append(p)
+	world._render_pickups()
+	_check(world._mm["simit"].multimesh.visible_instance_count == 2, "simit more than 3 units behind the gull are hidden")
+	world._sparks.clear()
+	world._sparks.burst(Vector3(0.0, 10.0, 500.0), Color.WHITE, 5, 6.0, 0.6, 7.0)
+	world._sparks._process(0.016)
+	_check(world._sparks.multimesh.visible_instance_count == 5, "a burst draws its sprites from the shared pool")
+	for i in 20:
+		world._sparks._process(0.05)
+	_check(world._sparks.multimesh.visible_instance_count == 0, "burst sprites fade out and are gone")
+
+
+func _test_title_clock(world: GameWorld) -> void:
+	GameState.reset_run()
+	GameState.phase = GameState.Phase.TITLE
+	GameState.run_time = 200.0
+	world._simulate(0.02)
+	_check(GameState.run_time <= 60.0, "the title demo stays in the afternoon")
+	_check(not Save.daily_ids("2026-10-21").is_empty() and Save.daily_ids("2026-10-21") == Save.daily_ids("2026-10-21"), "daily missions are cached per date")

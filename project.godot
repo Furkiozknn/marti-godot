@@ -9,6 +9,7 @@ config/name="Martı"
 config/description="Fly a seagull over the Istanbul strait: snatch simit, dodge bridges and ships. Boğaz üzerinde bir martı: simit kap, köprü ve gemilerden kaç."
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.7", "Compatibility")
+config/icon="res://assets/ui/logo.png"
 
 [autoload]
 

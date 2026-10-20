@@ -7,6 +7,7 @@ signal start_pressed
 signal resume_pressed
 signal menu_pressed
 signal retry_pressed
+signal restart_pressed
 signal pause_pressed
 signal music_pressed
 signal sfx_pressed
@@ -16,6 +17,26 @@ signal settings_opened
 
 const CARD_MAX_WIDTH := 480.0
 const SLIDER_KEYS := ["master", "music", "sfx"]
+const LOGO := preload("res://assets/ui/logo.png")
+## Focus ring and touch target rules of the arena design language.
+const ACCENT := "#F59E0B"
+const FOCUS_RING := "#FDE68A"
+## Pause backdrop: a 13-tap blur of the frozen frame, darkened.
+const BLUR_SHADER := """
+shader_type canvas_item;
+uniform sampler2D screen : hint_screen_texture, filter_linear;
+
+void fragment() {
+	vec2 px = SCREEN_PIXEL_SIZE * 3.0;
+	vec3 c = texture(screen, SCREEN_UV).rgb * 0.2;
+	for (int i = 0; i < 12; i++) {
+		float a = float(i) * 0.5236;
+		vec2 d = vec2(cos(a), sin(a)) * px * (1.0 + float(i % 2));
+		c += texture(screen, SCREEN_UV + d).rgb * (0.8 / 12.0);
+	}
+	COLOR = vec4(c * 0.55, 1.0);
+}
+"""
 
 var _screens: Dictionary = {}
 var _cards: Array[PanelContainer] = []
@@ -37,19 +58,24 @@ var _btn_pause: IconButton
 var _btn_music: IconButton
 var _btn_sfx: IconButton
 var _btn_lang: IconButton
+var _btn_settings: IconButton
 var _title_tag: Label
 var _title_how: Label
 var _title_missions: Label
 var _title_highs: Label
 var _title_start: Button
 var _title_settings: Button
+var _title_credit: Label
+var _hints: Array[Label] = []
 var _over_head: Label
 var _over_new: Label
+var _over_reason: Label
 var _over_stats: Label
 var _over_missions: Label
 var _over_retry: Button
 var _pause_head: Label
 var _pause_resume: Button
+var _pause_restart: Button
 var _pause_settings: Button
 var _pause_menu: Button
 var _over_menu: Button
@@ -111,6 +137,7 @@ func show_screen(target: String, animate: bool = true) -> void:
 
 func show_over(run: Dictionary, is_new_best: bool) -> void:
 	_over_head.text = Loc.t("over")
+	_over_reason.text = Loc.t("reason_" + str(run.get("reason", "crash")))
 	_over_new.text = Loc.t("new_best") if is_new_best else ""
 	_over_stats.text = "%s  %d\n%s  %d\n%s  %s\n%s  %d" % [
 		Loc.t("score"), run["score"], Loc.t("best"), Save.best_score(),
@@ -152,13 +179,15 @@ func update_hud() -> void:
 func toast(text: String, tone: String) -> void:
 	if text == "":
 		return
+	# Tones of the arena design language: good (gold), bad (red), info (navy). "gold" is the old name of good.
+	var good := tone == "good" or tone == "gold"
 	var panel := PanelContainer.new()
-	panel.add_theme_stylebox_override("panel", _pill_style("#F59E0B" if tone == "gold" else ("#7F1D1D" if tone == "bad" else "#0F172A")))
+	panel.add_theme_stylebox_override("panel", _pill_style("#F59E0B" if good else ("#7F1D1D" if tone == "bad" else "#0F172A")))
 	panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	var lbl := _label(text, 16, HORIZONTAL_ALIGNMENT_CENTER)
 	# One line that sizes to its text: a wrapping label in this centred column would break every character.
 	lbl.autowrap_mode = TextServer.AUTOWRAP_OFF
-	lbl.add_theme_color_override("font_color", Color.html("#1F1300") if tone == "gold" else Color.WHITE)
+	lbl.add_theme_color_override("font_color", Color.html("#1F1300") if good else Color.WHITE)
 	panel.add_child(lbl)
 	_toasts.add_child(panel)
 	while _toasts.get_child_count() > 3:
@@ -175,10 +204,14 @@ func apply_texts() -> void:
 	_title_how.text = "%s\n%s\n%s\n%s" % [Loc.t("how_steer"), Loc.t("how_dive"), Loc.t("how_simit"), Loc.t("how_avoid")]
 	_title_start.text = Loc.t("start")
 	_title_settings.text = Loc.t("settings")
+	_title_credit.text = Loc.t("credit")
 	_title_missions.text = "%s\n%s" % [Loc.t("missions"), _mission_summary()]
 	_title_highs.text = "%s\n%s" % [Loc.t("highs"), _high_summary()]
+	for h in _hints:
+		h.text = Loc.t("hint")
 	_pause_head.text = Loc.t("paused")
 	_pause_resume.text = Loc.t("resume")
+	_pause_restart.text = Loc.t("restart")
 	_pause_settings.text = Loc.t("settings")
 	_pause_menu.text = Loc.t("menu")
 	_over_retry.text = Loc.t("retry")
@@ -197,6 +230,7 @@ func apply_texts() -> void:
 	_btn_music.tooltip_text = Loc.t("music_btn")
 	_btn_sfx.tooltip_text = Loc.t("sfx_btn")
 	_btn_lang.tooltip_text = Loc.t("language")
+	_btn_settings.tooltip_text = Loc.t("settings")
 	for key in SLIDER_KEYS:
 		(_sliders[key] as HSlider).value = Save.settings[key]
 	set_music_on(Save.settings["music_on"])
@@ -215,13 +249,21 @@ func _build_hud() -> void:
 
 	# Top bar: a rounded panel with the stats, and a row of four icon buttons. Both fit side by side
 	# on a 390 px wide phone screen.
-	var bar := HBoxContainer.new()
+	# A flow container: on a narrow phone the icon row (44 px touch targets) wraps under the stats.
+	var bar := HFlowContainer.new()
 	bar.set_anchors_and_offsets_preset(Control.PRESET_TOP_WIDE)
 	bar.offset_left = 10
 	bar.offset_right = -10
 	bar.offset_top = 8
-	bar.add_theme_constant_override("separation", 8)
+	bar.alignment = FlowContainer.ALIGNMENT_END
+	bar.add_theme_constant_override("h_separation", 8)
+	bar.add_theme_constant_override("v_separation", 6)
 	bar.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	# Toasts and chips sit just under the bar, however many rows it has.
+	bar.resized.connect(func() -> void:
+		if _chips and _toasts:
+			_chips.offset_top = bar.size.y + 18
+			_toasts.offset_top = bar.size.y + 18)
 	_hud.add_child(bar)
 
 	var stats := PanelContainer.new()
@@ -229,10 +271,25 @@ func _build_hud() -> void:
 	stats.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	stats.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	bar.add_child(stats)
+	var stats_row := HBoxContainer.new()
+	stats_row.add_theme_constant_override("separation", 8)
+	stats_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	stats.add_child(stats_row)
+	# Crest (28 px) and name on the left of the bar.
+	var brand := HBoxContainer.new()
+	brand.add_theme_constant_override("separation", 6)
+	brand.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	brand.alignment = BoxContainer.ALIGNMENT_CENTER
+	brand.add_child(_crest(28))
+	var name_lbl := _hud_label(16)
+	name_lbl.text = "Martı"
+	name_lbl.add_theme_color_override("font_color", Color.html("#FDE68A"))
+	brand.add_child(name_lbl)
+	stats_row.add_child(brand)
 	var lines := VBoxContainer.new()
 	lines.add_theme_constant_override("separation", 0)
 	lines.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	stats.add_child(lines)
+	stats_row.add_child(lines)
 	_score = _hud_label(20)
 	lines.add_child(_score)
 	var mid := HBoxContainer.new()
@@ -263,7 +320,8 @@ func _build_hud() -> void:
 	_btn_music = _icon_button("music", music_pressed.emit)
 	_btn_sfx = _icon_button("sound", sfx_pressed.emit)
 	_btn_lang = _icon_button("globe", lang_pressed.emit)
-	for b in [_btn_pause, _btn_music, _btn_sfx, _btn_lang]:
+	_btn_settings = _icon_button("gear", _open_settings_from_hud)
+	for b in [_btn_pause, _btn_music, _btn_sfx, _btn_lang, _btn_settings]:
 		row.add_child(b)
 
 	_chips = _label("", 14)
@@ -312,6 +370,9 @@ func _build_hud() -> void:
 
 func _build_title() -> void:
 	var box := _overlay("title")
+	var crest := _crest(112)
+	crest.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+	box.add_child(crest)
 	box.add_child(_logo(52))
 	_title_tag = _label("", 16, HORIZONTAL_ALIGNMENT_CENTER)
 	box.add_child(_title_tag)
@@ -328,27 +389,44 @@ func _build_title() -> void:
 	_title_highs = _label("", 14)
 	box.add_child(_title_highs)
 	box.add_child(_hint_label())
+	_title_credit = _label("", 12, HORIZONTAL_ALIGNMENT_CENTER)
+	_title_credit.modulate.a = 0.6
+	box.add_child(_title_credit)
 
 
+## Pause: Resume, Restart, Settings, Main menu, one per row (the same order in every arena game).
 func _build_pause() -> void:
 	var box := _overlay("pause")
+	# The frozen game shows through a dimmed, blurred backdrop.
+	var backdrop := ColorRect.new()
+	backdrop.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+	backdrop.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	var blur := Shader.new()
+	blur.code = BLUR_SHADER
+	backdrop.material = ShaderMaterial.new()
+	(backdrop.material as ShaderMaterial).shader = blur
+	var root: Control = _screens["pause"]
+	root.add_child(backdrop)
+	root.move_child(backdrop, 0)
 	_pause_head = _label("", 36, HORIZONTAL_ALIGNMENT_CENTER)
 	box.add_child(_pause_head)
-	var row := _row()
-	_pause_resume = _button("", resume_pressed.emit, Vector2(170, 52), true)
-	_pause_settings = _button("", func() -> void: _open_settings("pause"), Vector2(150, 44))
-	_pause_menu = _button("", menu_pressed.emit, Vector2(150, 44))
-	row.add_child(_pause_resume)
-	row.add_child(_pause_settings)
-	row.add_child(_pause_menu)
-	box.add_child(row)
 	box.add_child(_hint_label())
+	_pause_resume = _button("", resume_pressed.emit, Vector2(240, 52), true)
+	_pause_restart = _button("", restart_pressed.emit, Vector2(240, 46))
+	_pause_settings = _button("", func() -> void: _open_settings("pause"), Vector2(240, 46))
+	_pause_menu = _button("", menu_pressed.emit, Vector2(240, 46))
+	for b in [_pause_resume, _pause_restart, _pause_settings, _pause_menu]:
+		b.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
+		box.add_child(b)
 
 
 func _build_over() -> void:
 	var box := _overlay("over")
 	_over_head = _label("", 36, HORIZONTAL_ALIGNMENT_CENTER)
 	box.add_child(_over_head)
+	_over_reason = _label("", 16, HORIZONTAL_ALIGNMENT_CENTER)
+	_over_reason.modulate.a = 0.85
+	box.add_child(_over_reason)
 	_over_new = _label("", 18, HORIZONTAL_ALIGNMENT_CENTER)
 	_over_new.add_theme_color_override("font_color", Color.html("#FDE68A"))
 	box.add_child(_over_new)
@@ -378,8 +456,11 @@ func _build_settings() -> void:
 		slider.min_value = 0.0
 		slider.max_value = 1.0
 		slider.step = 0.05
-		slider.custom_minimum_size = Vector2(240, 28)
+		slider.custom_minimum_size = Vector2(240, touch_size() * 0.8)
 		slider.value_changed.connect(_on_slider.bind(key))
+		# Saved when the drag ends too, so leaving settings with Esc never loses a change.
+		slider.drag_ended.connect(func(_changed: bool) -> void: Save.save_all())
+		slider.add_theme_stylebox_override("focus", _focus_ring(8))
 		_sliders[key] = slider
 		box.add_child(slider)
 	_set_lang = _button("", _toggle_language, Vector2(260, 44))
@@ -387,6 +468,8 @@ func _build_settings() -> void:
 	_set_quality = _button("", _toggle_quality, Vector2(260, 44))
 	box.add_child(_set_quality)
 	_set_fullscreen = CheckBox.new()
+	_set_fullscreen.custom_minimum_size = Vector2(0, touch_size())
+	_set_fullscreen.add_theme_stylebox_override("focus", _focus_ring(10))
 	_set_fullscreen.toggled.connect(_on_fullscreen)
 	box.add_child(_set_fullscreen)
 	_set_back = _button("", _close_settings, Vector2(170, 48), true)
@@ -441,7 +524,24 @@ func _logo(size: int) -> Label:
 func _hint_label() -> Label:
 	var lbl := _label(Loc.t("hint"), 12, HORIZONTAL_ALIGNMENT_CENTER)
 	lbl.modulate.a = 0.7
+	_hints.append(lbl)
 	return lbl
+
+
+## The generated crest (a round badge), square, at the given size.
+func _crest(px: int) -> TextureRect:
+	var r := TextureRect.new()
+	r.texture = LOGO
+	r.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+	r.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+	r.custom_minimum_size = Vector2(px, px)
+	r.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	return r
+
+
+## Touch screens get 44 px targets (the arena rule); a mouse gets slightly smaller icon buttons.
+static func touch_size() -> float:
+	return 44.0 if DisplayServer.is_touchscreen_available() else 38.0
 
 
 func _label(text: String, size: int, align: HorizontalAlignment = HORIZONTAL_ALIGNMENT_LEFT) -> Label:
@@ -461,7 +561,7 @@ func _button(text: String, handler: Callable, min_size: Vector2, primary: bool =
 	b.add_theme_font_size_override("font_size", 18)
 	b.add_theme_stylebox_override("normal", _button_style("#F59E0B" if primary else "#1E293B"))
 	b.add_theme_stylebox_override("hover", _button_style("#FBBF24" if primary else "#334155"))
-	b.add_theme_stylebox_override("focus", _button_style("#FBBF24" if primary else "#334155"))
+	b.add_theme_stylebox_override("focus", _focus_ring(14))
 	b.add_theme_stylebox_override("pressed", _button_style("#B45309" if primary else "#0F172A"))
 	b.add_theme_color_override("font_color", Color.html("#1F1300") if primary else Color.WHITE)
 	b.add_theme_color_override("font_hover_color", Color.html("#1F1300") if primary else Color.WHITE)
@@ -475,6 +575,17 @@ func _card_style() -> StyleBoxFlat:
 	s.border_color = Color(1, 1, 1, 0.18)
 	s.set_border_width_all(1)
 	s.set_corner_radius_all(22)
+	return s
+
+
+## A visible keyboard focus ring, drawn over the button's normal style.
+static func _focus_ring(radius: int) -> StyleBoxFlat:
+	var s := StyleBoxFlat.new()
+	s.draw_center = false
+	s.border_color = Color.html(FOCUS_RING)
+	s.set_border_width_all(3)
+	s.set_corner_radius_all(radius)
+	s.set_expand_margin_all(3)
 	return s
 
 
@@ -550,6 +661,13 @@ func _open_settings(from: String) -> void:
 	show_screen("settings")
 
 
+## The gear in the HUD pauses the run first, so Back returns to the pause menu.
+func _open_settings_from_hud() -> void:
+	if GameState.phase == GameState.Phase.PLAYING:
+		pause_pressed.emit()
+	_open_settings.call_deferred("pause")
+
+
 func _close_settings() -> void:
 	Save.save_all()
 	show_screen(_set_back_target)
@@ -620,21 +738,30 @@ func _high_summary() -> String:
 	return "\n".join(lines)
 
 
-## Small row of gull-head icons: lost lives are dimmed.
+## Small row of feathers (as in the browser version): lost lives are dimmed.
 class LivesIcon:
 	extends Control
 	var lives: int = 3
 
 	func _init() -> void:
-		custom_minimum_size = Vector2(3 * 18, 18)
+		custom_minimum_size = Vector2(3 * 16, 18)
 		mouse_filter = Control.MOUSE_FILTER_IGNORE
 
 	func _draw() -> void:
 		for i in 3:
-			var c := Vector2(8 + i * 18, 9)
+			var base := Vector2(5 + i * 16, 17)
+			var tip := base + Vector2(6, -16)
 			var col := Color(1, 1, 1, 0.95) if i < lives else Color(1, 1, 1, 0.2)
-			draw_circle(c, 6.5, col)
-			draw_circle(c + Vector2(2.5, -2), 2.2, Color.html("#F59E0B") if i < lives else Color(1, 1, 1, 0.1))
+			# A leaf-shaped vane around a slanted quill.
+			var vane := PackedVector2Array()
+			for k in 9:
+				var t := k / 8.0
+				vane.append(base.lerp(tip, t) + Vector2(-1, -0.4) * sin(t * PI) * 4.0)
+			for k in range(7, 0, -1):
+				var t := k / 8.0
+				vane.append(base.lerp(tip, t) + Vector2(1, 0.4) * sin(t * PI) * 4.0)
+			draw_colored_polygon(vane, col)
+			draw_line(base + Vector2(-1, 2), tip, Color.html("#F59E0B") if i < lives else Color(1, 1, 1, 0.1), 1.2)
 
 
 ## A small round button with no text: its icon is drawn in code (see IconDraw), so no font is needed.
@@ -643,12 +770,15 @@ class IconButton:
 	var _icon: IconDraw
 
 	func _init(kind: String) -> void:
-		custom_minimum_size = Vector2(34, 34)
-		focus_mode = Control.FOCUS_NONE
+		var px := GameUI.touch_size()
+		custom_minimum_size = Vector2(px, px)
+		# Reachable with Tab, but a click does not keep the focus (Space must still dive while playing).
+		focus_mode = Control.FOCUS_ALL
 		add_theme_stylebox_override("normal", _style(Color(0.1, 0.14, 0.22, 0.6)))
 		add_theme_stylebox_override("hover", _style(Color(0.2, 0.27, 0.38, 0.8)))
 		add_theme_stylebox_override("pressed", _style(Color(0.02, 0.04, 0.08, 0.9)))
-		add_theme_stylebox_override("focus", StyleBoxEmpty.new())
+		add_theme_stylebox_override("focus", GameUI._focus_ring(10))
+		pressed.connect(release_focus)
 		_icon = IconDraw.new(kind)
 		_icon.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 		add_child(_icon)
@@ -702,5 +832,14 @@ class IconDraw:
 					var a := TAU * i / 24.0
 					meridian.append(c + Vector2(0.45 * s * cos(a), 0.95 * s * sin(a)))
 				draw_polyline(meridian, col, 1.5)
+			"gear":
+				# Eight teeth around a ring with a hole.
+				var teeth := PackedVector2Array()
+				for i in 32:
+					var a := TAU * i / 32.0
+					var r := (1.0 if (i >> 1) % 2 == 0 else 0.72) * s
+					teeth.append(c + Vector2(cos(a), sin(a)) * r)
+				draw_colored_polygon(teeth, col)
+				draw_circle(c, 0.32 * s, Color(0.1, 0.14, 0.22, 1.0))
 		if not on and (kind == "music" or kind == "sound"):
 			draw_line(c + Vector2(-s, -s), c + Vector2(s, s), Color.html("#F87171"), 2.5)

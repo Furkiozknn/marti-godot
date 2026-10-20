@@ -16,3 +16,5 @@ cabin_z = -0.8
 cabin_color = Color(0.9922, 0.902, 0.5412, 1)
 has_mast = true
 mast_height = 5.0
+model = "fishing"
+collision = Array[AABB]([AABB(-1.6, 0, -3, 3.2, 1.8, 6), AABB(-0.35, 0, 0.55, 0.7, 5.2, 0.7), AABB(-0.9, 1.4, -1.7, 1.8, 1.4, 1.8)])

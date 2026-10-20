@@ -18,6 +18,8 @@ var enabled: bool = true
 var settings: Dictionary = {}
 var highs: Array = []
 var missions: Dictionary = {}
+var _daily_key: String = ""
+var _daily: Array = []
 
 
 func _ready() -> void:
@@ -28,12 +30,12 @@ func _ready() -> void:
 
 func default_settings() -> Dictionary:
 	return {
-		"master": 1.0,
+		"master": 0.8,
 		"music": 0.6,
 		"sfx": 0.8,
 		"music_on": true,
 		"sfx_on": true,
-		"language": "tr",
+		"language": "tr" if OS.get_locale_language() == "tr" else "en",
 		"quality": "low" if OS.has_feature("web") else "high",
 		"fullscreen": false,
 	}
@@ -109,6 +111,9 @@ func today_key() -> String:
 
 ## The three missions of a given day, picked by a seeded shuffle so every player gets the same set.
 func daily_ids(date_key: String) -> Array:
+	# Cached per date: mission_track calls this on every frame (distance).
+	if date_key == _daily_key:
+		return _daily
 	var ids: Array = []
 	for res in MISSION_RES:
 		ids.append((res as MissionDef).id)
@@ -119,7 +124,9 @@ func daily_ids(date_key: String) -> Array:
 		var tmp: String = ids[i]
 		ids[i] = ids[j]
 		ids[j] = tmp
-	return ids.slice(0, 3)
+	_daily_key = date_key
+	_daily = ids.slice(0, 3)
+	return _daily
 
 
 func mission_def(id: String) -> MissionDef:

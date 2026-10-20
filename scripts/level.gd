@@ -18,6 +18,7 @@ class Obstacle:
 	var sway: float = 0.0          # x offset of kites and storms, updated every frame
 	var hostile: bool = false      # rival flock: its members steal simit
 	var members: Array[Vector3] = []
+	var horned: bool = false       # ferry: its horn has sounded
 	var node: Node3D = null
 
 
@@ -37,11 +38,12 @@ class Pickup:
 
 
 class Prop:
-	var kind: String = ""          # "house", "roof", "tree", "dome", "minaret", "balloon" or "cloud"
+	var kind: String = ""          # "house", "roof", "tree", "mosque", "yali", "galata", "maiden", "balloon" or "cloud"
 	var pos: Vector3 = Vector3.ZERO
 	var size: Vector3 = Vector3.ONE
 	var color: Color = Color.WHITE
 	var phase: float = 0.0
+	var rot_y: float = 0.0         # turn about y (landmarks face the water)
 
 
 var obstacles: Array[Obstacle] = []

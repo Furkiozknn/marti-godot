@@ -22,6 +22,39 @@ static func add_box(st: SurfaceTool, xf: Transform3D, size: Vector3, color: Colo
 	add_quad(st, xf, color, Vector3(h.x, -h.y, -h.z), Vector3(-h.x, -h.y, -h.z), Vector3(-h.x, h.y, -h.z), Vector3(h.x, h.y, -h.z), Vector3.FORWARD)
 
 
+## Adds a primitive mesh (sphere, cylinder, cone) with one colour, moved by xf.
+static func add_primitive(st: SurfaceTool, mesh: PrimitiveMesh, xf: Transform3D, color: Color) -> void:
+	var arr := mesh.get_mesh_arrays()
+	var pos: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	var nor: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
+	var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX]
+	var nb := xf.basis.inverse().transposed()
+	for i in idx:
+		st.set_normal((nb * nor[i]).normalized())
+		st.set_color(color)
+		st.add_vertex(xf * pos[i])
+
+
+static func sphere(radius: float, segments: int = 12, rings: int = 8) -> SphereMesh:
+	var s := SphereMesh.new()
+	s.radius = radius
+	s.height = radius * 2.0
+	s.radial_segments = segments
+	s.rings = rings
+	return s
+
+
+## A cylinder, or a cone when top is 0. Centred like CylinderMesh: y from -height/2 to height/2.
+static func cylinder(top: float, bottom: float, height: float, segments: int = 10) -> CylinderMesh:
+	var c := CylinderMesh.new()
+	c.top_radius = top
+	c.bottom_radius = bottom
+	c.height = height
+	c.radial_segments = segments
+	c.rings = 1
+	return c
+
+
 ## Adds one planar quad (a, b, c, d in order around the face) with the given outward normal.
 static func add_quad(st: SurfaceTool, xf: Transform3D, color: Color, a: Vector3, b: Vector3, c: Vector3, d: Vector3, normal: Vector3) -> void:
 	var wn := (xf.basis * normal).normalized()
