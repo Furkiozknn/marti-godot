@@ -1,0 +1,12 @@
+# Godot cache and generated output
+.godot/
+build/
+
+# Keep the .uid files (Godot 4 resource IDs must be committed)
+!*.uid
+
+# OS junk
+.DS_Store
+Thumbs.db
+override.cfg
+*.wav

@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="BoatType" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/boat_type.gd" id="1_boat"]
+
+[resource]
+script = ExtResource("1_boat")
+id = "ferry"
+speed = 11.0
+length = 15.0
+width = 6.0
+height = 2.6
+hull_color = Color(0.9725, 0.9804, 0.9882, 1)
+deck_color = Color(0.8627, 0.149, 0.149, 1)
+cabin_size = Vector3(5, 2.2, 8)
+cabin_z = -1.5
+cabin_color = Color(0.9922, 0.902, 0.5412, 1)
+has_mast = false
+mast_height = 0.0

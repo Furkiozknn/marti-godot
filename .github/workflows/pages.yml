@@ -1,0 +1,83 @@
+name: Build and publish
+
+# Exports the Godot project for the web on GitHub's servers and publishes it to GitHub Pages.
+# Godot and its export templates are downloaded here (pinned and checksum-verified), so nothing
+# has to be installed on the developer's machine. Pages must use "GitHub Actions" as its source.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  GODOT_VERSION: 4.7.2-stable
+  GODOT_TEMPLATES: 4.7.2.stable
+  # SHA512 values from SHA512-SUMS.txt of the godotengine/godot 4.7.2-stable release
+  GODOT_SHA512: 9aa00f7a605200940bce3027a567b782f49bd8e940dd06ae9e987bd65aee1b1467edd56ed84fcdcbdd44354bf613bdbb4e5d2913e925850368e150c59ed54c65
+  TEMPLATES_SHA512: ca4d71c4d7b81dfc15d1a98baa07534aa95b03fdda78a0075b06672e1648d2e5f40980c9adc28d23e1b92e732ee7bf3461997aa804af74ec2fcd7a93ccb84079
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Godot and export templates
+        run: |
+          set -euo pipefail
+          name="Godot_v${GODOT_VERSION}_linux.x86_64"
+          curl -fsSL -o godot.zip "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}/${name}.zip"
+          echo "${GODOT_SHA512}  godot.zip" | sha512sum -c -
+          unzip -q godot.zip && chmod +x "$name" && sudo mv "$name" /usr/local/bin/godot
+          curl -fsSL -o templates.tpz "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}/Godot_v${GODOT_VERSION}_export_templates.tpz"
+          echo "${TEMPLATES_SHA512}  templates.tpz" | sha512sum -c -
+          mkdir -p "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATES}"
+          unzip -q templates.tpz -d tpl && mv tpl/templates/* "$HOME/.local/share/godot/export_templates/${GODOT_TEMPLATES}/"
+          godot --version
+
+      # A fresh checkout has no .godot cache; importing first avoids unrelated parse errors.
+      - name: Import
+        run: godot --headless --path . --import
+
+      - name: Tests
+        run: |
+          set -o pipefail
+          godot --headless --path . --scene res://tests/run_tests.tscn 2>&1 | tee "$RUNNER_TEMP/tests.log"
+          grep -q "TESTS PASSED" "$RUNNER_TEMP/tests.log"
+          ! grep -q "SCRIPT ERROR" "$RUNNER_TEMP/tests.log"
+
+      - name: Export web
+        run: |
+          set -euo pipefail
+          mkdir -p build/web
+          godot --headless --path . --export-release "Web" build/web/index.html
+          ls -l build/web
+          touch build/web/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: build/web
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5

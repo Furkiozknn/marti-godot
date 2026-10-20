@@ -1,0 +1,11 @@
+[gd_resource type="Resource" script_class="MissionDef" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/mission_def.gd" id="1_mission"]
+
+[resource]
+script = ExtResource("1_mission")
+id = "combo"
+stat = "combo"
+goal = 10
+text_tr = "Tek koşuda %d kombo yap"
+text_en = "Reach a %d combo in one run"

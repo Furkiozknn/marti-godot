@@ -1,0 +1,18 @@
+[gd_resource type="Resource" script_class="BoatType" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/boat_type.gd" id="1_boat"]
+
+[resource]
+script = ExtResource("1_boat")
+id = "sail"
+speed = 9.0
+length = 7.0
+width = 2.6
+height = 0.9
+hull_color = Color(0.9725, 0.9804, 0.9882, 1)
+deck_color = Color(0.2, 0.3, 0.45, 1)
+cabin_size = Vector3(0.1, 12, 4)
+cabin_z = -0.8
+cabin_color = Color(1, 1, 1, 1)
+has_mast = true
+mast_height = 22.0

@@ -1,0 +1,34 @@
+[gd_resource type="Resource" script_class="GameConfig" load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/game_config.gd" id="1_cfg"]
+
+[resource]
+script = ExtResource("1_cfg")
+lives = 3
+start_speed = 27.0
+speed_gain = 31.0
+speed_time = 70.0
+tail_boost = 14.0
+attract_speed = 36.0
+stamina_max = 100.0
+stamina_drain = 2.2
+stamina_drain_growth = 0.01
+steal_cost = 18.0
+simit_points = 10
+simit_stamina = 6.0
+fish_points = 30
+fish_stamina = 14.0
+power_points = 25
+power_stamina = 10.0
+gold_bonus = 50
+mission_bonus = 150
+combo_window = 3.2
+tail_time = 8.0
+gold_time = 12.0
+shield_invuln = 1.2
+hit_invuln = 1.8
+corridor = 20.0
+min_height = 2.4
+max_height = 33.0
+look_ahead = 340.0
+keep_behind = 90.0
