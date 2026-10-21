@@ -185,7 +185,7 @@ func _test_collision_boxes() -> void:
 	var tanker := load("res://data/boats/tanker.tres") as BoatType
 	_check(_solid(tanker, Vector3(1.9, 6.0, -13.0)), "the tanker bridge block is solid")
 	var fishing := load("res://data/boats/fishing.tres") as BoatType
-	_check(_solid(fishing, Vector3(0.0, 2.5, -0.8)) and _solid(fishing, Vector3(0.0, 4.5, 0.9)), "the fishing cabin and mast are solid")
+	_check(_solid(fishing, Vector3(0.0, 2.9, -2.2)) and _solid(fishing, Vector3(0.0, 4.5, 0.3)) and not _solid(fishing, Vector3(0.0, 2.5, 1.5)), "the fishing cabin and mast are solid where the model has them")
 	var sail := load("res://data/boats/sail.tres") as BoatType
 	_check(_solid(sail, Vector3(0.0, 10.0, -0.8)) and _solid(sail, Vector3(0.0, 20.0, 0.5)), "the sail and the mast are solid")
 

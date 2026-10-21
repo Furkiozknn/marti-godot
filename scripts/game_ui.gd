@@ -272,7 +272,7 @@ func _build_hud() -> void:
 	stats.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	bar.add_child(stats)
 	var stats_row := HBoxContainer.new()
-	stats_row.add_theme_constant_override("separation", 8)
+	stats_row.add_theme_constant_override("separation", 16)
 	stats_row.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	stats.add_child(stats_row)
 	# Crest (28 px) and name on the left of the bar.
@@ -282,7 +282,8 @@ func _build_hud() -> void:
 	brand.alignment = BoxContainer.ALIGNMENT_CENTER
 	brand.add_child(_crest(28))
 	var name_lbl := _hud_label(16)
-	name_lbl.text = "Martı"
+	# The same word mark as the title card ("Martı."): without the dot the dotless ı reads as a cut-off letter.
+	name_lbl.text = "Martı."
 	name_lbl.add_theme_color_override("font_color", Color.html("#FDE68A"))
 	brand.add_child(name_lbl)
 	stats_row.add_child(brand)
