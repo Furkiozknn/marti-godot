@@ -118,6 +118,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		toggle_sfx()
 	elif event.is_action_pressed("toggle_language"):
 		toggle_language()
+	elif event.is_action_pressed("pause") and ui.is_settings_open():
+		# P / Esc in settings goes back to the screen it was opened from, like the browser version
+		ui.close_settings()
 	elif event.is_action_pressed("pause"):
 		toggle_pause()
 	elif event.is_action_pressed("toggle_fullscreen"):

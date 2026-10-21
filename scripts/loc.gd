@@ -53,7 +53,7 @@ const TEXT := {
 	"reason_crash": ["Üç kez çarptın", "Three hits"],
 	"reason_energy": ["Enerjin bitti", "Out of stamina"],
 	"reason_timeout": ["Süre doldu", "Time is up"],
-	"credit": ["Claude Game Arena · built by Claude Haiku 5.5 · assets remastered", "Claude Game Arena · built by Claude Haiku 5.5 · assets remastered"],
+	"credit": ["Claude Game Arena · Claude Haiku 5.5 yaptı · varlıklar yenilendi", "Claude Game Arena · built by Claude Haiku 5.5 · assets remastered"],
 }
 
 

@@ -80,6 +80,9 @@ var _pause_settings: Button
 var _pause_menu: Button
 var _over_menu: Button
 var _over_settings: Button
+## The last end card, so a language switch on the end screen can refill it.
+var _over_run: Dictionary = {}
+var _over_is_new: bool = false
 var _set_head: Label
 var _set_labels: Dictionary = {}
 var _sliders: Dictionary = {}
@@ -92,6 +95,8 @@ var _set_back_target: String = "title"
 
 func _ready() -> void:
 	layer = 10
+	_fit_scale()
+	get_viewport().size_changed.connect(_fit_scale)
 	_build_hud()
 	_build_title()
 	_build_pause()
@@ -107,6 +112,16 @@ func _ready() -> void:
 	apply_texts()
 	_fit_cards()
 	show_screen("title", false)
+
+
+## Portrait screens get a narrow base size: with the 1280x720 base a 390 px wide phone would show the
+## whole interface at a third of its size. Landscape keeps the project's 1280x720.
+func _fit_scale() -> void:
+	var win := get_window()
+	var portrait := win.size.y > win.size.x
+	var base := Vector2i(430, 760) if portrait else Vector2i(1280, 720)
+	if win.content_scale_size != base:
+		win.content_scale_size = base
 
 
 func set_world(world: GameWorld) -> void:
@@ -136,6 +151,15 @@ func show_screen(target: String, animate: bool = true) -> void:
 
 
 func show_over(run: Dictionary, is_new_best: bool) -> void:
+	_over_run = run
+	_over_is_new = is_new_best
+	_fill_over()
+	show_screen("over")
+
+
+func _fill_over() -> void:
+	var run := _over_run
+	var is_new_best := _over_is_new
 	_over_head.text = Loc.t("over")
 	_over_reason.text = Loc.t("reason_" + str(run.get("reason", "crash")))
 	_over_new.text = Loc.t("new_best") if is_new_best else ""
@@ -143,7 +167,6 @@ func show_over(run: Dictionary, is_new_best: bool) -> void:
 		Loc.t("score"), run["score"], Loc.t("best"), Save.best_score(),
 		Loc.t("dist"), Loc.format_distance(run["dist"]), Loc.t("simit"), run["simit"]]
 	_over_missions.text = _mission_summary()
-	show_screen("over")
 
 
 func set_music_on(on: bool) -> void:
@@ -217,6 +240,8 @@ func apply_texts() -> void:
 	_over_retry.text = Loc.t("retry")
 	_over_menu.text = Loc.t("menu")
 	_over_settings.text = Loc.t("settings")
+	if not _over_run.is_empty():
+		_fill_over()
 	_set_head.text = Loc.t("settings")
 	_set_labels["master"].text = Loc.t("master")
 	_set_labels["music"].text = Loc.t("music")
@@ -435,7 +460,11 @@ func _build_over() -> void:
 	box.add_child(_over_stats)
 	_over_missions = _label("", 14, HORIZONTAL_ALIGNMENT_CENTER)
 	box.add_child(_over_missions)
-	var row := _row()
+	# A flow row: on a narrow phone the third button wraps under the other two instead of leaving the card.
+	var row := HFlowContainer.new()
+	row.alignment = FlowContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("h_separation", 10)
+	row.add_theme_constant_override("v_separation", 10)
 	_over_retry = _button("", retry_pressed.emit, Vector2(170, 52), true)
 	_over_menu = _button("", menu_pressed.emit, Vector2(150, 44))
 	_over_settings = _button("", func() -> void: _open_settings("over"), Vector2(150, 44))
@@ -473,7 +502,7 @@ func _build_settings() -> void:
 	_set_fullscreen.add_theme_stylebox_override("focus", _focus_ring(10))
 	_set_fullscreen.toggled.connect(_on_fullscreen)
 	box.add_child(_set_fullscreen)
-	_set_back = _button("", _close_settings, Vector2(170, 48), true)
+	_set_back = _button("", close_settings, Vector2(170, 48), true)
 	box.add_child(_set_back)
 
 
@@ -669,7 +698,11 @@ func _open_settings_from_hud() -> void:
 	_open_settings.call_deferred("pause")
 
 
-func _close_settings() -> void:
+func is_settings_open() -> bool:
+	return _current == "settings"
+
+
+func close_settings() -> void:
 	Save.save_all()
 	show_screen(_set_back_target)
 
